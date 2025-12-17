@@ -1,4 +1,3 @@
-
 # SUPPRESS ALL WARNINGS
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -6,7 +5,6 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # LOGGING SETUP
-
 import logging
 logging.basicConfig(
     level=logging.INFO,
@@ -52,39 +50,31 @@ MODEL_DIR = "models"
 TRAINING_CSV_PATH = "groundwater_cleaned.csv"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# MODEL FILE SAFETY CHECK (FAIL FAST)
-REQUIRED_MODEL_FILES = [
-    "scaler.joblib",
-    "pca.joblib",
-    "rf_cluster_emulator.joblib",
-    "autoencoder.pt"
-]
+# HARDCODED FALLBACKS FOR DEMO MODE (lowercase column names)
+HARDCODED_FEATURE_COLUMNS = ["ph", "tds", "nitrate", "chloride", "hardness", "sulfate", "fluoride", "iron", "conductivity"]
+HARDCODED_FEATURE_DEFAULTS = {
+    "ph": 7.2,
+    "tds": 550.0,
+    "nitrate": 35.0,
+    "chloride": 190.0,
+    "hardness": 280.0,
+    "sulfate": 100.0,
+    "fluoride": 0.8,
+    "iron": 0.25,
+    "conductivity": 850.0
+}
 
-for f in REQUIRED_MODEL_FILES:
-    path = os.path.join(MODEL_DIR, f)
-    if not os.path.exists(path):
-        raise RuntimeError(
-            f"❌ Missing model file: {path}\n"
-            f"➡ Please place the trained model inside '{MODEL_DIR}/'"
-        )
-
-# LOAD TRAINING DATA
-
-if not os.path.exists(TRAINING_CSV_PATH):
-    raise RuntimeError("groundwater_cleaned.csv not found. Please add training data.")
-
-df_train = pd.read_csv(TRAINING_CSV_PATH)
-
-FEATURE_COLUMNS = df_train.select_dtypes(include=["number"]).columns.tolist()
-FEATURE_DEFAULTS = df_train[FEATURE_COLUMNS].median().to_dict()
+# GLOBAL CONSTANTS (moved out for performance)
+STANDARD_DESIRABLE = {
+    "tds": 500, "nitrate": 45, "fluoride": 1.0, "iron": 0.3,
+    "chloride": 250, "hardness": 200, "sulfate": 200
+}
 
 IMPORTANT_USER_FEATURES = [
     "ph", "tds", "nitrate", "chloride",
     "hardness", "sulfate", "fluoride",
     "iron", "conductivity"
 ]
-
-# DOMAIN CONSTANTS
 
 WEIGHTS = {
     "nitrate": 0.20,
@@ -129,36 +119,54 @@ PLOT_LIMITS = {
     "CONDUCTIVITY": 800,
 }
 
-# LOAD MODELS
-scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.joblib"))
-pca = joblib.load(os.path.join(MODEL_DIR, "pca.joblib"))
-rf = joblib.load(os.path.join(MODEL_DIR, "rf_cluster_emulator.joblib"))
+# INITIALIZE WITH DEMO VALUES
+MODEL_AVAILABLE = False
+scaler = pca = rf = ae = None
+FEATURE_COLUMNS = HARDCODED_FEATURE_COLUMNS
+FEATURE_DEFAULTS = HARDCODED_FEATURE_DEFAULTS
 
-class Autoencoder(nn.Module):
-    def __init__(self, input_dim, latent_dim=8):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.ReLU(),
-            nn.BatchNorm1d(64),
-            nn.Linear(64, latent_dim)
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, input_dim)
-        )
-    def forward(self, x):
-        z = self.encoder(x)
-        return self.decoder(z), z
+# ATTEMPT TO LOAD FULL MODELS AND TRAINING DATA
+try:
+    df_train = pd.read_csv(TRAINING_CSV_PATH)
+    numeric_cols = df_train.select_dtypes(include=["number"]).columns.tolist()
+    FEATURE_COLUMNS = [col.lower() for col in numeric_cols]
+    FEATURE_DEFAULTS = {col.lower(): df_train[col].median() for col in numeric_cols}
 
-ae = Autoencoder(pca.n_components_)
-ae.load_state_dict(torch.load(os.path.join(MODEL_DIR, "autoencoder.pt"), map_location=DEVICE))
-ae.to(DEVICE)
-ae.eval()
+    scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.joblib"))
+    pca = joblib.load(os.path.join(MODEL_DIR, "pca.joblib"))
+    rf = joblib.load(os.path.join(MODEL_DIR, "rf_cluster_emulator.joblib"))
+
+    class Autoencoder(nn.Module):
+        def __init__(self, input_dim, latent_dim=8):
+            super().__init__()
+            self.encoder = nn.Sequential(
+                nn.Linear(input_dim, 64),
+                nn.ReLU(),
+                nn.BatchNorm1d(64),
+                nn.Linear(64, latent_dim)
+            )
+            self.decoder = nn.Sequential(
+                nn.Linear(latent_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, input_dim)
+            )
+        def forward(self, x):
+            z = self.encoder(x)
+            return self.decoder(z), z
+
+    ae = Autoencoder(pca.n_components_)
+    ae.load_state_dict(torch.load(os.path.join(MODEL_DIR, "autoencoder.pt"), map_location=DEVICE))
+    ae.to(DEVICE)
+    ae.eval()
+
+    # Success → switch to full mode
+    MODEL_AVAILABLE = True
+    logging.info("Full ML models and training data loaded successfully.")
+except Exception as e:
+    logging.warning(f"Models/training data not found or failed to load ({e}). Running in DEMO MODE with limited ML capabilities.")
 
 # ============================================================
-# GROQ SUMMARY GENERATOR (CURRENT MODEL)
+# GROQ SUMMARY GENERATOR
 # ============================================================
 def generate_executive_summary(data: Dict, mode: str) -> str:
     if not groq_client:
@@ -204,7 +212,7 @@ Data JSON:
     try:
         logging.info(f"Calling Groq for {mode} summary")
         completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Current active high-performance model
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
             temperature=0.6,
@@ -226,7 +234,18 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ============================================================
-# ROOT ENDPOINT — SUCCESS MESSAGE (FIXED 404)
+# HEALTH CHECK ENDPOINT
+# ============================================================
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "model_loaded": MODEL_AVAILABLE,
+        "deployment_mode": "Full ML Mode" if MODEL_AVAILABLE else "Demo Mode"
+    }
+
+# ============================================================
+# ROOT ENDPOINT
 # ============================================================
 @app.get("/")
 def root():
@@ -234,11 +253,13 @@ def root():
         "message": "🚀 Next-Gen Groundwater Quality Intelligence API is running successfully!",
         "status": "active",
         "version": "3.1",
+        "deployment_mode": "Full ML Mode" if MODEL_AVAILABLE else "Demo Mode (ML models not loaded – rule-based analysis only)",
         "endpoints": {
             "location_analysis": "/mode1/location-analysis (POST)",
             "sample_analysis": "/mode2/sample-analysis (POST)",
             "interactive_docs": "/docs",
-            "openapi_spec": "/openapi.json"
+            "openapi_spec": "/openapi.json",
+            "health": "/health"
         },
         "note": "Use /docs for Swagger UI to test endpoints."
     }
@@ -260,7 +281,7 @@ class SampleQuery(BaseModel):
     groundwater_trend: Optional[str] = None
 
 # ============================================================
-# MODE 1 — ENHANCED LOCATION ANALYSIS + GROQ SUMMARY
+# MODE 1 — LOCATION ANALYSIS (fixed reference-before-assignment bug)
 # ============================================================
 @app.post("/mode1/location-analysis")
 def location_analysis(q: LocationQuery):
@@ -268,6 +289,7 @@ def location_analysis(q: LocationQuery):
 
     response_data = {
         "data_source": "ILLUSTRATIVE DEMO — Real USGS/Earthdata integration ready via loaded keys.",
+        "deployment_mode": "Illustrative Demo Mode (location data is placeholder)",
         "location": {
             "country": q.country or "India",
             "state": q.state or "Punjab",
@@ -346,44 +368,59 @@ def trend_plot():
     return StreamingResponse(buf, media_type="image/png")
 
 # ============================================================
-# MODE 2 — SAMPLE ANALYSIS + GROQ SUMMARY
+# MODE 2 — SAMPLE ANALYSIS (fixed global mutation, added deployment_mode)
 # ============================================================
 @app.post("/mode2/sample-analysis")
 def sample_analysis(sample: SampleQuery):
     logging.info(f"MODE2 request: parameters={sample.parameters}, season={sample.season}, trend={sample.groundwater_trend}")
     
+    local_model_available = MODEL_AVAILABLE
+    
     season = (sample.season or "").lower()
     trend = (sample.groundwater_trend or "").lower()
 
     user_params = {k.lower(): v for k, v in sample.parameters.items()}
-    input_vector, missing = [], []
+    input_vector = []
+    missing = []
     for col in FEATURE_COLUMNS:
-        col_lower = col.lower()
-        if col_lower in user_params:
-            input_vector.append(user_params[col_lower])
+        if col in user_params:
+            input_vector.append(user_params[col])
         else:
-            input_vector.append(FEATURE_DEFAULTS[col])
+            input_vector.append(FEATURE_DEFAULTS.get(col, 7.5))
             missing.append(col)
 
     values = np.array([input_vector], dtype=np.float32)
-    
-    xs = scaler.transform(values)
-    xp = pca.transform(xs)
-    with torch.no_grad():
-        xt = torch.tensor(xp, dtype=torch.float32).to(DEVICE)
-        xrec, _ = ae(xt)
-        recon = xrec.cpu().numpy()
-    recon_error = float(np.mean((xp - recon) ** 2))
-    anomaly_status = "Anomalous" if recon_error > 0.15 else "Normal"
-    cluster_id = int(rf.predict(xp)[0])
+    param_values = dict(zip(FEATURE_COLUMNS, input_vector))
 
+    # --- ML inference (only if models available) ---
+    recon_error = None
+    anomaly_status = "Unavailable"
+    cluster_id = None
     cluster_confidence = 0.5
-    if hasattr(rf, "predict_proba"):
-        proba = rf.predict_proba(xp)[0]
-        cluster_confidence = float(np.max(proba))
+    recon_conf = 0.0
+    recon_level = "Unavailable"
 
-    param_values = {col.lower(): input_vector[i] for i, col in enumerate(FEATURE_COLUMNS)}
+    if local_model_available:
+        try:
+            xs = scaler.transform(values)
+            xp = pca.transform(xs)
+            xt = torch.tensor(xp, dtype=torch.float32).to(DEVICE)
+            with torch.no_grad():
+                xrec, _ = ae(xt)
+                recon = xrec.cpu().numpy()
+            recon_error = float(np.mean((xp - recon) ** 2))
+            anomaly_status = "Anomalous" if recon_error > 0.15 else "Normal"
+            cluster_id = int(rf.predict(xp)[0])
+            if hasattr(rf, "predict_proba"):
+                proba = rf.predict_proba(xp)[0]
+                cluster_confidence = float(np.max(proba))
+            recon_conf = max(0.0, min(1.0, 1.0 - recon_error))
+            recon_level = "High" if recon_error < 0.1 else "Medium" if recon_error < 0.2 else "Low"
+        except Exception as ml_e:
+            logging.error(f"ML inference failed during request: {ml_e}")
+            local_model_available = False
 
+    # --- Rule-based calculations (always available) ---
     exceeded_params = []
     is_unsafe = False
     if param_values.get("nitrate", 0) > CRITICAL_LIMITS["nitrate"]:
@@ -400,8 +437,7 @@ def sample_analysis(sample: SampleQuery):
         exceeded_params.append(f"pH ({ph_val:.1f} outside 6.5–8.5)")
         is_unsafe = True
 
-    standard_desirable = {"tds": 500, "nitrate": 45, "fluoride": 1.0, "iron": 0.3,
-                          "chloride": 250, "hardness": 200, "sulfate": 200}
+    # WQI calculation
     qi_dict = {}
     weighted_sum = 0.0
     total_weight = 0.0
@@ -411,7 +447,7 @@ def sample_analysis(sample: SampleQuery):
             deviation = max(ph_val - CRITICAL_LIMITS["ph_max"], CRITICAL_LIMITS["ph_min"] - ph_val, 0)
             qi = deviation * 50
         else:
-            si = standard_desirable.get(p, 1000)
+            si = STANDARD_DESIRABLE.get(p, 1000)
             qi = min(200, (ci / si) * 100 if si > 0 else 0)
         qi_dict[p] = qi
         weighted_sum += qi * w
@@ -430,14 +466,18 @@ def sample_analysis(sample: SampleQuery):
     else:
         category = "Poor"
 
-    missing_ratio = len(missing) / len(FEATURE_COLUMNS)
-    recon_conf = max(0, min(1, 1 - recon_error))
-    recon_level = "High" if recon_error < 0.1 else "Medium" if recon_error < 0.2 else "Low"
+    # Confidence & uncertainty
+    missing_ratio = len(missing) / len(FEATURE_COLUMNS) if FEATURE_COLUMNS else 0
     missing_level = "High" if missing_ratio < 0.2 else "Medium" if missing_ratio < 0.5 else "Low"
-    confidence_level = "High" if recon_level == "High" and missing_level == "High" else \
-                       "Medium" if recon_level != "Low" and missing_level != "Low" else "Low"
-    overall_confidence = round((recon_conf + cluster_confidence) / 2, 3)
+    if local_model_available and recon_error is not None:
+        confidence_level = "High" if recon_level == "High" and missing_level == "High" else \
+                           "Medium" if recon_level != "Low" and missing_level != "Low" else "Low"
+        overall_confidence = round((recon_conf + cluster_confidence) / 2, 3)
+    else:
+        confidence_level = "Low"
+        overall_confidence = 0.0
 
+    # Primary risks & summary
     primary_risks = []
     if any("nitrate" in e.lower() for e in exceeded_params):
         primary_risks.append("Agricultural nitrate runoff")
@@ -470,13 +510,15 @@ def sample_analysis(sample: SampleQuery):
     ai_summary = " ".join(summary_parts) if summary_parts else "Sample appears typical."
 
     response_data = {
+        "deployment_mode": "Full ML Mode" if local_model_available else "Demo Mode (ML models not loaded – rule-based analysis only)",
         "ml_results": {
-            "reconstruction_error": round(recon_error, 4),
+            "reconstruction_error": round(recon_error, 4) if recon_error is not None else None,
             "anomaly_status": anomaly_status,
             "cluster_id": cluster_id,
-            "cluster_confidence": round(cluster_confidence, 3),
+            "cluster_confidence": round(cluster_confidence, 3) if cluster_id is not None else None,
             "overall_model_confidence": overall_confidence,
-            "confidence_level": confidence_level
+            "confidence_level": confidence_level,
+            "note": None if local_model_available else "ML inference unavailable in demo mode. Rule-based results provided."
         },
         "regulatory_compliance": {
             "status": "Non-compliant (Unsafe)" if is_unsafe else "Compliant",
@@ -491,7 +533,7 @@ def sample_analysis(sample: SampleQuery):
             "source": "Bureau of Indian Standards (IS 10500:2012) & WHO Guidelines"
         },
         "uncertainty_analysis": {
-            "data_completeness": "High" if missing_ratio < 0.2 else "Moderate" if missing_ratio < 0.5 else "Low",
+            "data_completeness": missing_level,
             "missing_features_count": len(missing),
             "seasonal_context_provided": bool(season),
             "seasonal_variability_note": "High in monsoon regions" if season else "Unknown",
@@ -519,7 +561,7 @@ def sample_plot(sample: SampleQuery):
     logging.info("MODE2 plot requested")
     user_params = {k.lower(): v for k, v in sample.parameters.items()}
     labels = [f.upper() for f in IMPORTANT_USER_FEATURES]
-    values = [user_params.get(f.lower(), FEATURE_DEFAULTS.get(f, 0)) for f in IMPORTANT_USER_FEATURES]
+    values = [user_params.get(f.lower(), FEATURE_DEFAULTS.get(f.lower(), 0)) for f in IMPORTANT_USER_FEATURES]
 
     fig, ax = plt.subplots(figsize=(13, 7))
     bars = ax.bar(labels, values, color='skyblue', edgecolor='navy')
@@ -542,7 +584,6 @@ def sample_plot(sample: SampleQuery):
         ax.text(bar.get_x() + bar.get_width()/2., height + max(values)*0.01,
                 f'{height:.1f}', ha='center', va='bottom', fontsize=9)
 
-    ax.legend()
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=200, bbox_inches="tight")
     buf.seek(0)

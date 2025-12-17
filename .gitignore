@@ -1,19 +1,15 @@
-# Python
-__pycache__/
-*.pyc
+# ML models
+*.pt
+*.joblib
 
-# Environment variables
-.env
+# Data
+*.csv
 
 # Jupyter
 .ipynb_checkpoints/
 
-# ML models & data
-models/
-*.pt
-*.joblib
-*.csv
+# Environment
+.env
 
-# OS
-.DS_Store
-Thumbs.db
+# Cache
+__pycache__/
