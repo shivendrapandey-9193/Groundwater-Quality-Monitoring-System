@@ -1,6 +1,5 @@
 
 # Data
-*.csv
 
 # Jupyter
 .ipynb_checkpoints/
