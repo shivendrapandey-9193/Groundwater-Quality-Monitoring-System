@@ -57,71 +57,52 @@ TRAINING_CSV_PATH = os.path.join(BASE_DIR, "groundwater_cleaned.csv")
 DEVICE = torch.device("cpu")
 logging.info("Deployment: Render-compatible (CPU-only, absolute paths)")
 
-# GLOBAL CONSTANTS
-STANDARD_DESIRABLE = {
-    "tds": 500, "nitrate": 45, "fluoride": 1.0, "iron": 0.3,
-    "chloride": 250, "hardness": 200, "sulfate": 200
-}
+# STARTUP VERIFICATION LOGS
+logging.info(f"BASE_DIR = {BASE_DIR}")
+logging.info(f"Files in BASE_DIR = {os.listdir(BASE_DIR)}")
 
-IMPORTANT_USER_FEATURES = [
-    "ph", "tds", "nitrate", "chloride",
-    "hardness", "sulfate", "fluoride",
-    "iron", "conductivity"
-]
+if os.path.exists(MODEL_DIR):
+    logging.info(f"Files in models/ = {os.listdir(MODEL_DIR)}")
+else:
+    logging.critical("models/ directory NOT FOUND")
 
-WEIGHTS = {
-    "nitrate": 0.20,
-    "tds": 0.15,
-    "fluoride": 0.15,
-    "iron": 0.10,
-    "ph": 0.10,
-    "chloride": 0.10,
-    "hardness": 0.10,
-    "sulfate": 0.10,
-}
+# =========================
+# CRITICAL ML ASSET LOADING (FAIL LOUDLY)
+# =========================
+try:
+    logging.info(f"Loading training CSV: {TRAINING_CSV_PATH}")
+    if not os.path.exists(TRAINING_CSV_PATH):
+        raise FileNotFoundError(f"Training CSV not found at {TRAINING_CSV_PATH}")
+    
+    df_train = pd.read_csv(TRAINING_CSV_PATH)
 
-CRITICAL_LIMITS = {
-    "nitrate": 45,
-    "fluoride": 1.5,
-    "iron": 1.0,
-    "ph_min": 6.5,
-    "ph_max": 8.5,
-}
+    numeric_cols = df_train.select_dtypes(include=["number"]).columns.tolist()
+    FEATURE_COLUMNS = [col.lower() for col in numeric_cols]
+    FEATURE_DEFAULTS = {col.lower(): df_train[col].median() for col in numeric_cols}
 
-BIS_WHO_STANDARDS: List[Dict] = [
-    {"parameter": "pH", "desirable": "6.5–8.5", "permissible": "No relaxation", "unit": "", "health_note": "Affects taste & corrosivity"},
-    {"parameter": "TDS", "desirable": "500", "permissible": "2000", "unit": "mg/L", "health_note": "Affects palatability"},
-    {"parameter": "Nitrate", "desirable": "45", "permissible": "No relaxation", "unit": "mg/L", "health_note": "Methemoglobinemia risk"},
-    {"parameter": "Fluoride", "desirable": "1.0", "permissible": "1.5", "unit": "mg/L", "health_note": "Dental/skeletal fluorosis"},
-    {"parameter": "Chloride", "desirable": "250", "permissible": "1000", "unit": "mg/L", "health_note": "Salty taste"},
-    {"parameter": "Total Hardness (as CaCO3)", "desirable": "200", "permissible": "600", "unit": "mg/L", "health_note": "Scaling & soap inefficiency"},
-    {"parameter": "Sulfate", "desirable": "200", "permissible": "400", "unit": "mg/L", "health_note": "Laxative effect"},
-    {"parameter": "Iron", "desirable": "0.3", "permissible": "1.0", "unit": "mg/L", "health_note": "Staining & metallic taste"},
-    {"parameter": "Conductivity", "desirable": "<800", "permissible": "No fixed limit", "unit": "µS/cm", "health_note": "Proxy for TDS"},
-]
+    logging.info("Loading ML artifacts...")
+    scaler_path = os.path.join(MODEL_DIR, "scaler.joblib")
+    pca_path = os.path.join(MODEL_DIR, "pca.joblib")
+    rf_path = os.path.join(MODEL_DIR, "rf_cluster_emulator.joblib")
+    
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(f"Scaler missing: {scaler_path}")
+    if not os.path.exists(pca_path):
+        raise FileNotFoundError(f"PCA missing: {pca_path}")
+    if not os.path.exists(rf_path):
+        raise FileNotFoundError(f"RF missing: {rf_path}")
+        
+    scaler = joblib.load(scaler_path)
+    pca = joblib.load(pca_path)
+    rf = joblib.load(rf_path)
 
-PLOT_LIMITS = {
-    "PH": (6.5, 8.5),
-    "TDS": 500,
-    "NITRATE": 45,
-    "CHLORIDE": 250,
-    "HARDNESS": 200,
-    "SULFATE": 200,
-    "FLUORIDE": 1.0,
-    "IRON": 0.3,
-    "CONDUCTIVITY": 800,
-}
+    logging.info("Scaler, PCA, RF loaded successfully")
 
-# LOAD TRAINING DATA AND MODELS (PRODUCTION: ASSUMES FILES EXIST)
-df_train = pd.read_csv(TRAINING_CSV_PATH)
-numeric_cols = df_train.select_dtypes(include=["number"]).columns.tolist()
-FEATURE_COLUMNS = [col.lower() for col in numeric_cols]
-FEATURE_DEFAULTS = {col.lower(): df_train[col].median() for col in numeric_cols}
+except Exception as e:
+    logging.critical(f"❌ Failed to load ML assets: {e}")
+    raise RuntimeError("Critical ML files missing. Deployment aborted.") from e
 
-scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.joblib"))
-pca = joblib.load(os.path.join(MODEL_DIR, "pca.joblib"))
-rf = joblib.load(os.path.join(MODEL_DIR, "rf_cluster_emulator.joblib"))
-
+# Autoencoder class
 class Autoencoder(nn.Module):
     def __init__(self, input_dim, latent_dim=8):
         super().__init__()
@@ -140,17 +121,26 @@ class Autoencoder(nn.Module):
         z = self.encoder(x)
         return self.decoder(z), z
 
-# Autoencoder definition (unchanged)
-ae = Autoencoder(pca.n_components_)
-# ✅ Correct model loading (NO relative paths, Render-safe CPU)
-ae.load_state_dict(
-    torch.load(
-        os.path.join(MODEL_DIR, "autoencoder.pt"),
-        map_location=DEVICE
+# Autoencoder loading (guarded)
+try:
+    ae_path = os.path.join(MODEL_DIR, "autoencoder.pt")
+    if not os.path.exists(ae_path):
+        raise FileNotFoundError(f"Autoencoder missing: {ae_path}")
+        
+    ae = Autoencoder(pca.n_components_)
+    ae.load_state_dict(
+        torch.load(
+            ae_path,
+            map_location=DEVICE
+        )
     )
-)
-ae.to(DEVICE)
-ae.eval()
+    ae.to(DEVICE)
+    ae.eval()
+    logging.info("Autoencoder loaded successfully")
+
+except Exception as e:
+    logging.critical(f"❌ Failed to load autoencoder: {e}")
+    raise RuntimeError("Autoencoder model missing or corrupted.") from e
 
 logging.info("Full ML models and training data loaded successfully.")
 
