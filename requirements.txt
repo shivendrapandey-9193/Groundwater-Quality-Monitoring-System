@@ -1,18 +1,24 @@
+# Use CPU-only PyTorch (CRITICAL for Render)
+--extra-index-url https://download.pytorch.org/whl/cpu
 
+# Backend
 fastapi
 uvicorn[standard]
 python-dotenv
 pydantic
 
+# ML & Data
 numpy
 pandas
 scikit-learn
 joblib
+torch==2.2.2+cpu
 
-torch
-
+# Visualization
 matplotlib
 
+# LLM / Summary
 groq
 
+# Typing
 typing-extensions
